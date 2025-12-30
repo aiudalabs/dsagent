@@ -39,7 +39,7 @@ from aiuda_planner.core.planner import PlanParser
 from aiuda_planner.utils.logger import AgentLogger, Colors
 from aiuda_planner.utils.notebook import NotebookBuilder, ExecutionTracker
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # Main classes
