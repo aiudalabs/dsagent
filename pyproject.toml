@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aiuda-planner-agent"
+version = "0.1.0"
+description = "AI Agent with dynamic planning and persistent Jupyter kernel execution"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "AiudaLabs", email = "contact@aiudalabs.com" }
+]
+keywords = [
+    "ai",
+    "agent",
+    "llm",
+    "jupyter",
+    "data-analysis",
+    "machine-learning",
+    "planner"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "litellm>=1.0.0",
+    "jupyter-client>=8.0.0",
+    "ipykernel>=6.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "pandas>=2.3.3",
+    "openpyxl>=3.1.5",
+    "scikit-learn>=1.7.2",
+    "statistics>=1.0.3.5",
+    "seaborn>=0.13.2",
+    "matplotlib>=3.10.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+api = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "sse-starlette>=1.0.0",
+]
+
+[project.scripts]
+aiuda-planner = "aiuda_planner.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/aiudalabs/aiuda-planner-agent"
+Documentation = "https://github.com/aiudalabs/aiuda-planner-agent#readme"
+Repository = "https://github.com/aiudalabs/aiuda-planner-agent"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aiuda_planner"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
