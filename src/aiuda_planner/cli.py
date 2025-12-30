@@ -9,8 +9,17 @@ from pathlib import Path
 
 # Load .env file if exists (before importing agent)
 from dotenv import load_dotenv
-load_dotenv()  # Loads from .env in current directory
-load_dotenv(Path.home() / ".aiuda" / ".env")  # Also check ~/.aiuda/.env
+
+# Try multiple locations for .env (first found wins)
+_env_locations = [
+    Path.cwd() / ".env",                          # Current directory
+    Path(__file__).parent.parent.parent.parent / ".env",  # Project root
+    Path.home() / ".aiuda" / ".env",              # User config
+]
+for _env_path in _env_locations:
+    if _env_path.exists():
+        load_dotenv(_env_path)
+        break
 
 from aiuda_planner import PlannerAgent, EventType
 
