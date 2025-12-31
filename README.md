@@ -1,6 +1,9 @@
 # DSAgent
 
 [![Upload Python Package](https://github.com/nmlemus/dsagent/actions/workflows/python-publish.yml/badge.svg?branch=main)](https://github.com/nmlemus/dsagent/actions/workflows/python-publish.yml)
+[![PyPI](https://img.shields.io/pypi/v/datascience-agent)](https://pypi.org/project/datascience-agent/)
+[![Python](https://img.shields.io/pypi/pyversions/datascience-agent)](https://pypi.org/project/datascience-agent/)
+[![License](https://img.shields.io/github/license/nmlemus/dsagent)](https://github.com/nmlemus/dsagent/blob/main/LICENSE)
 
 An AI-powered autonomous agent for data analysis with dynamic planning and persistent Jupyter kernel execution.
 
