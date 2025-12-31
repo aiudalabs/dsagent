@@ -75,9 +75,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  aiuda-planner "Analyze sales data" --data ./data/sales.csv
-  aiuda-planner "Build a predictive model" --data ./dataset --model gpt-4o
-  aiuda-planner "Create visualizations" --data ./data --workspace ./output
+  dsagent "Analyze sales data" --data ./data/sales.csv
+  dsagent "Build a predictive model" --data ./dataset --model gpt-4o
+  dsagent "Create visualizations" --data ./data --workspace ./output
+  dsagent "Analyze with approval" --data ./data --hitl plan_only
         """,
     )
 
