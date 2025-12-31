@@ -45,7 +45,7 @@ from dsagent.utils.logger import AgentLogger, Colors
 from dsagent.utils.notebook import NotebookBuilder, ExecutionTracker
 from dsagent.utils.run_logger import RunLogger
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     # Main classes
