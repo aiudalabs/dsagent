@@ -11,6 +11,7 @@ An AI-powered autonomous agent for data analysis with dynamic planning and persi
 - **Event Streaming**: Real-time events for UI integration
 - **Comprehensive Logging**: Full execution logs for debugging and ML retraining
 - **Session Management**: State persistence for multi-user scenarios
+- **Human-in-the-Loop**: Configurable checkpoints for human approval and feedback
 
 ## Installation
 
@@ -178,6 +179,81 @@ agent = PlannerAgent(
 )
 ```
 
+## Human-in-the-Loop (HITL)
+
+Control agent autonomy with configurable HITL modes:
+
+```python
+from dsagent import PlannerAgent, HITLMode, EventType
+
+# Create agent with HITL enabled
+agent = PlannerAgent(
+    model="gpt-4o",
+    hitl=HITLMode.PLAN_ONLY,  # Pause for plan approval
+)
+agent.start()
+
+# Run with streaming to handle HITL events
+for event in agent.run_stream("Analyze sales data"):
+    if event.type == EventType.HITL_AWAITING_PLAN_APPROVAL:
+        print(f"Plan proposed:\n{event.plan.raw_text}")
+        # Approve the plan
+        agent.approve()
+        # Or reject: agent.reject("Bad plan")
+        # Or modify: agent.modify_plan("1. [ ] Better step")
+
+    elif event.type == EventType.ANSWER_ACCEPTED:
+        print(f"Answer: {event.message}")
+
+agent.shutdown()
+```
+
+### HITL Modes
+
+| Mode | Description |
+|------|-------------|
+| `HITLMode.NONE` | Fully autonomous (default) |
+| `HITLMode.PLAN_ONLY` | Pause after plan generation for approval |
+| `HITLMode.ON_ERROR` | Pause when code execution fails |
+| `HITLMode.PLAN_AND_ANSWER` | Pause on plan + before final answer |
+| `HITLMode.FULL` | Pause before every code execution |
+
+### HITL Actions
+
+```python
+# Approve current pending item
+agent.approve("Looks good!")
+
+# Reject and abort
+agent.reject("This approach won't work")
+
+# Modify the plan
+agent.modify_plan("1. [ ] New step\n2. [ ] Another step")
+
+# Modify code before execution (FULL mode)
+agent.modify_code("import pandas as pd\ndf = pd.read_csv('data.csv')")
+
+# Skip current step
+agent.skip()
+
+# Send feedback to guide the agent
+agent.send_feedback("Try using a different algorithm")
+```
+
+### HITL Events
+
+```python
+EventType.HITL_AWAITING_PLAN_APPROVAL    # Waiting for plan approval
+EventType.HITL_AWAITING_CODE_APPROVAL    # Waiting for code approval (FULL mode)
+EventType.HITL_AWAITING_ERROR_GUIDANCE   # Waiting for error guidance
+EventType.HITL_AWAITING_ANSWER_APPROVAL  # Waiting for answer approval
+EventType.HITL_FEEDBACK_RECEIVED         # Human feedback was received
+EventType.HITL_PLAN_APPROVED             # Plan was approved
+EventType.HITL_PLAN_MODIFIED             # Plan was modified
+EventType.HITL_PLAN_REJECTED             # Plan was rejected
+EventType.HITL_EXECUTION_ABORTED         # Execution was aborted
+```
+
 ## Supported Models
 
 Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers):
@@ -219,6 +295,7 @@ dsagent/
 │   ├── context.py       # RunContext - workspace management
 │   ├── engine.py        # AgentEngine - main loop
 │   ├── executor.py      # JupyterExecutor - code execution
+│   ├── hitl.py          # HITLGateway - human-in-the-loop
 │   └── planner.py       # PlanParser - response parsing
 ├── schema/
 │   └── models.py        # Pydantic models
