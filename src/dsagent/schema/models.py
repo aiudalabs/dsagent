@@ -12,6 +12,53 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class HITLMode(str, Enum):
+    """Human-in-the-Loop modes for controlling agent autonomy.
+
+    Modes:
+        NONE: Fully autonomous, no human intervention (default)
+        PLAN_ONLY: Pause after plan generation for approval
+        ON_ERROR: Pause only when code execution fails
+        PLAN_AND_ANSWER: Pause on plan + before final answer
+        FULL: Pause before every code execution
+    """
+
+    NONE = "none"
+    PLAN_ONLY = "plan_only"
+    ON_ERROR = "on_error"
+    PLAN_AND_ANSWER = "plan_and_answer"
+    FULL = "full"
+
+
+class HITLAction(str, Enum):
+    """Actions a human can take when HITL is triggered.
+
+    Actions:
+        APPROVE: Accept and continue execution
+        REJECT: Reject and abort execution
+        MODIFY: Provide modified plan/code
+        RETRY: Retry the failed operation
+        SKIP: Skip current step and continue
+        FEEDBACK: Provide textual feedback to the agent
+    """
+
+    APPROVE = "approve"
+    REJECT = "reject"
+    MODIFY = "modify"
+    RETRY = "retry"
+    SKIP = "skip"
+    FEEDBACK = "feedback"
+
+
+class HumanFeedback(BaseModel):
+    """Feedback from human during HITL interaction."""
+
+    action: HITLAction
+    message: Optional[str] = None
+    modified_plan: Optional[str] = None
+    modified_code: Optional[str] = None
+
+
 class AgentConfig(BaseSettings):
     """Configuration for the Planner Agent.
 
@@ -228,6 +275,17 @@ class EventType(str, Enum):
     # Notebook events
     NOTEBOOK_SAVED = "notebook_saved"
 
+    # Human-in-the-Loop events
+    HITL_AWAITING_PLAN_APPROVAL = "hitl_awaiting_plan_approval"
+    HITL_AWAITING_CODE_APPROVAL = "hitl_awaiting_code_approval"
+    HITL_AWAITING_ERROR_GUIDANCE = "hitl_awaiting_error_guidance"
+    HITL_AWAITING_ANSWER_APPROVAL = "hitl_awaiting_answer_approval"
+    HITL_FEEDBACK_RECEIVED = "hitl_feedback_received"
+    HITL_PLAN_APPROVED = "hitl_plan_approved"
+    HITL_PLAN_MODIFIED = "hitl_plan_modified"
+    HITL_PLAN_REJECTED = "hitl_plan_rejected"
+    HITL_EXECUTION_ABORTED = "hitl_execution_aborted"
+
 
 class AgentEvent(BaseModel):
     """Event emitted by the agent for streaming to UI."""
@@ -243,6 +301,10 @@ class AgentEvent(BaseModel):
     result: Optional[ExecutionResult] = None
     message: Optional[str] = None
     error: Optional[str] = None
+
+    # HITL-specific fields
+    feedback: Optional[HumanFeedback] = None
+    awaiting_input: bool = False
 
     def to_sse(self) -> str:
         """Convert to Server-Sent Events format."""

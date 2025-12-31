@@ -8,6 +8,9 @@ from dsagent.schema.models import (
     PlanState,
     AgentEvent,
     EventType,
+    HITLMode,
+    HITLAction,
+    HumanFeedback,
 )
 
 __all__ = [
@@ -18,4 +21,7 @@ __all__ = [
     "PlanState",
     "AgentEvent",
     "EventType",
+    "HITLMode",
+    "HITLAction",
+    "HumanFeedback",
 ]

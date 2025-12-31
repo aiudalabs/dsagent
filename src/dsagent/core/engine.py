@@ -13,9 +13,13 @@ from dsagent.schema.models import (
     EventType,
     AgentEvent,
     PlanState,
+    HITLMode,
+    HITLAction,
+    HumanFeedback,
 )
 from dsagent.core.planner import PlanParser
 from dsagent.core.executor import JupyterExecutor
+from dsagent.core.hitl import HITLGateway
 from dsagent.utils.notebook import NotebookBuilder
 from dsagent.utils.logger import AgentLogger, Colors
 
@@ -127,6 +131,7 @@ class AgentEngine:
         notebook_builder: Optional[NotebookBuilder] = None,
         event_callback: Optional[Callable[[AgentEvent], Any]] = None,
         run_logger: Optional["RunLogger"] = None,
+        hitl_gateway: Optional[HITLGateway] = None,
     ) -> None:
         """Initialize the engine.
 
@@ -137,6 +142,7 @@ class AgentEngine:
             notebook_builder: Optional notebook builder for tracking
             event_callback: Optional callback for streaming events
             run_logger: Optional run logger for comprehensive logging
+            hitl_gateway: Optional HITL gateway for human intervention
         """
         self.config = config
         self.executor = executor
@@ -144,11 +150,13 @@ class AgentEngine:
         self.notebook = notebook_builder
         self.event_callback = event_callback
         self.run_logger = run_logger
+        self.hitl = hitl_gateway
 
         self.messages: list[Message] = []
         self.current_plan: Optional[PlanState] = None
         self.round_num = 0
         self.answer: Optional[str] = None
+        self._initial_plan_approved = False  # Track if first plan was approved
 
     def _emit(
         self,
@@ -161,6 +169,44 @@ class AgentEngine:
         if self.event_callback:
             self.event_callback(event)
         return event
+
+    def _wait_for_hitl(
+        self,
+        event_type: EventType,
+        message: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Generator[AgentEvent, None, Optional[HumanFeedback]]:
+        """Wait for HITL feedback (generator that yields awaiting event).
+
+        Args:
+            event_type: The HITL event type to emit
+            message: Message for the event
+            **kwargs: Additional event data
+
+        Yields:
+            AgentEvent indicating waiting for input
+
+        Returns:
+            Human feedback or None if HITL not enabled
+        """
+        if not self.hitl:
+            return None
+
+        # Emit awaiting event
+        yield self._emit(event_type, message, awaiting_input=True, **kwargs)
+
+        # Wait for feedback (blocking)
+        feedback = self.hitl.wait_for_feedback()
+
+        # Emit feedback received event
+        if feedback:
+            yield self._emit(
+                EventType.HITL_FEEDBACK_RECEIVED,
+                f"Received: {feedback.action.value}",
+                feedback=feedback,
+            )
+
+        return feedback
 
     def _call_llm(self, messages: list[dict]) -> str:
         """Call the LLM with automatic fallbacks.
@@ -449,6 +495,46 @@ class AgentEngine:
                 if self.logger.verbose:
                     self.logger.print_plan(new_plan.raw_text)
 
+                # HITL: Check if we need plan approval (only for initial plan)
+                if self.hitl and self.hitl.should_pause_for_plan() and not self._initial_plan_approved:
+                    self.hitl.request_plan_approval(new_plan)
+                    yield self._emit(
+                        EventType.HITL_AWAITING_PLAN_APPROVAL,
+                        "Waiting for plan approval",
+                        plan=new_plan,
+                        awaiting_input=True,
+                    )
+
+                    feedback = self.hitl.wait_for_feedback()
+
+                    if feedback:
+                        yield self._emit(
+                            EventType.HITL_FEEDBACK_RECEIVED,
+                            f"Received: {feedback.action.value}",
+                            feedback=feedback,
+                        )
+
+                        if feedback.action == HITLAction.REJECT:
+                            yield self._emit(EventType.HITL_PLAN_REJECTED, feedback.message)
+                            yield self._emit(EventType.HITL_EXECUTION_ABORTED, "Plan rejected by user")
+                            return
+
+                        elif feedback.action == HITLAction.MODIFY and feedback.modified_plan:
+                            # Inject modified plan into conversation
+                            yield self._emit(EventType.HITL_PLAN_MODIFIED, "Plan modified by user")
+                            self.messages.append({"role": "assistant", "content": response})
+                            self.messages.append({
+                                "role": "user",
+                                "content": f"Please use this modified plan instead:\n\n{feedback.modified_plan}",
+                            })
+                            self._initial_plan_approved = True
+                            continue
+
+                        elif feedback.action == HITLAction.APPROVE:
+                            yield self._emit(EventType.HITL_PLAN_APPROVED, feedback.message)
+
+                    self._initial_plan_approved = True
+
             # Log thinking
             if thinking:
                 if self.run_logger:
@@ -479,6 +565,40 @@ class AgentEngine:
                     continue
 
                 self.answer = PlanParser.extract_answer(response)
+
+                # HITL: Check if we need answer approval (PLAN_AND_ANSWER or FULL mode)
+                if self.hitl and self.hitl.should_pause_for_answer():
+                    self.hitl.request_answer_approval(self.answer or "")
+                    yield self._emit(
+                        EventType.HITL_AWAITING_ANSWER_APPROVAL,
+                        "Waiting for answer approval",
+                        message=self.answer,
+                        awaiting_input=True,
+                    )
+
+                    feedback = self.hitl.wait_for_feedback()
+
+                    if feedback:
+                        yield self._emit(
+                            EventType.HITL_FEEDBACK_RECEIVED,
+                            f"Received: {feedback.action.value}",
+                            feedback=feedback,
+                        )
+
+                        if feedback.action == HITLAction.REJECT:
+                            yield self._emit(EventType.HITL_EXECUTION_ABORTED, "Answer rejected by user")
+                            return
+
+                        elif feedback.action == HITLAction.FEEDBACK and feedback.message:
+                            # Request more analysis based on feedback
+                            self.messages.append({"role": "assistant", "content": response})
+                            self.messages.append({
+                                "role": "user",
+                                "content": f"Please revise your answer based on this feedback: {feedback.message}",
+                            })
+                            self.answer = None
+                            continue
+
                 # Log accepted answer
                 if self.run_logger:
                     self.run_logger.log_answer(answer=self.answer or "", accepted=True)
@@ -487,6 +607,41 @@ class AgentEngine:
 
             # Execute code if present
             if code:
+                # HITL: Check if we need code approval before execution (FULL mode)
+                if self.hitl and self.hitl.should_pause_for_code():
+                    self.hitl.request_code_approval(code)
+                    yield self._emit(
+                        EventType.HITL_AWAITING_CODE_APPROVAL,
+                        "Waiting for code approval",
+                        code=code,
+                        awaiting_input=True,
+                    )
+
+                    feedback = self.hitl.wait_for_feedback()
+
+                    if feedback:
+                        yield self._emit(
+                            EventType.HITL_FEEDBACK_RECEIVED,
+                            f"Received: {feedback.action.value}",
+                            feedback=feedback,
+                        )
+
+                        if feedback.action == HITLAction.REJECT:
+                            yield self._emit(EventType.HITL_EXECUTION_ABORTED, "Code rejected by user")
+                            return
+
+                        elif feedback.action == HITLAction.SKIP:
+                            # Skip this code execution
+                            self.messages.append({"role": "assistant", "content": response})
+                            self.messages.append({
+                                "role": "user",
+                                "content": "Code execution was skipped by user. Please continue with the next step.",
+                            })
+                            continue
+
+                        elif feedback.action == HITLAction.MODIFY and feedback.modified_code:
+                            code = feedback.modified_code
+
                 yield self._emit(EventType.CODE_EXECUTING, code[:100] + "...")
 
                 if self.logger.verbose:
@@ -525,6 +680,47 @@ class AgentEngine:
                         EventType.CODE_FAILED,
                         result.output[:500] if result.output else "(no output)",
                     )
+
+                    # HITL: Check if we need error guidance (ON_ERROR or FULL mode)
+                    if self.hitl and self.hitl.should_pause_on_error():
+                        self.hitl.request_error_guidance(code, result.output)
+                        yield self._emit(
+                            EventType.HITL_AWAITING_ERROR_GUIDANCE,
+                            "Waiting for error guidance",
+                            code=code,
+                            error=result.output,
+                            awaiting_input=True,
+                        )
+
+                        feedback = self.hitl.wait_for_feedback()
+
+                        if feedback:
+                            yield self._emit(
+                                EventType.HITL_FEEDBACK_RECEIVED,
+                                f"Received: {feedback.action.value}",
+                                feedback=feedback,
+                            )
+
+                            if feedback.action == HITLAction.REJECT:
+                                yield self._emit(EventType.HITL_EXECUTION_ABORTED, "Aborted by user after error")
+                                return
+
+                            elif feedback.action == HITLAction.SKIP:
+                                self.messages.append({"role": "assistant", "content": response})
+                                self.messages.append({
+                                    "role": "user",
+                                    "content": "Error was acknowledged. Please skip this step and continue with the next one.",
+                                })
+                                continue
+
+                            elif feedback.action == HITLAction.FEEDBACK and feedback.message:
+                                # Inject user feedback into conversation
+                                self.messages.append({"role": "assistant", "content": response})
+                                self.messages.append({
+                                    "role": "user",
+                                    "content": f"Code failed with error:\n{result.output}\n\nUser guidance: {feedback.message}",
+                                })
+                                continue
 
                 if self.logger.verbose:
                     if result.success:

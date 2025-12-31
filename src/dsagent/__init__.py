@@ -32,11 +32,15 @@ from dsagent.schema.models import (
     PlanState,
     PlanStep,
     SessionState,
+    HITLMode,
+    HITLAction,
+    HumanFeedback,
 )
 from dsagent.core.executor import JupyterExecutor
 from dsagent.core.engine import AgentEngine
 from dsagent.core.planner import PlanParser
 from dsagent.core.context import RunContext
+from dsagent.core.hitl import HITLGateway
 from dsagent.utils.logger import AgentLogger, Colors
 from dsagent.utils.notebook import NotebookBuilder, ExecutionTracker
 from dsagent.utils.run_logger import RunLogger
@@ -63,6 +67,11 @@ __all__ = [
     "AgentEngine",
     # Session
     "SessionState",
+    # Human-in-the-Loop
+    "HITLMode",
+    "HITLAction",
+    "HumanFeedback",
+    "HITLGateway",
     # Context and Logging
     "RunContext",
     "RunLogger",

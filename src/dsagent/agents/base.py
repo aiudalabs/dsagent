@@ -13,9 +13,13 @@ from dsagent.schema.models import (
     EventType,
     SessionState,
     PlanState,
+    HITLMode,
+    HITLAction,
+    HumanFeedback,
 )
 from dsagent.core.executor import JupyterExecutor
 from dsagent.core.engine import AgentEngine
+from dsagent.core.hitl import HITLGateway
 from dsagent.utils.logger import AgentLogger
 from dsagent.utils.notebook import NotebookBuilder
 
@@ -74,6 +78,8 @@ class PlannerAgent:
         verbose: bool = True,
         event_callback: Optional[Callable[[AgentEvent], Any]] = None,
         context: Optional["RunContext"] = None,
+        hitl: HITLMode = HITLMode.NONE,
+        hitl_timeout: float = 300.0,
     ) -> None:
         """Initialize the planner agent.
 
@@ -88,6 +94,8 @@ class PlannerAgent:
             verbose: Print to console
             event_callback: Callback for streaming events to UI
             context: RunContext for organized workspace structure
+            hitl: Human-in-the-Loop mode (NONE, PLAN_ONLY, ON_ERROR, PLAN_AND_ANSWER, FULL)
+            hitl_timeout: Max seconds to wait for human feedback (default 5 min)
         """
         # Store or create context
         self.context = context
@@ -123,6 +131,11 @@ class PlannerAgent:
             verbose=verbose,
             event_callback=event_callback,
         )
+
+        # Initialize HITL gateway if enabled
+        self._hitl_gateway: Optional[HITLGateway] = None
+        if hitl != HITLMode.NONE:
+            self._hitl_gateway = HITLGateway(mode=hitl, timeout=hitl_timeout)
 
         self.event_callback = event_callback
         self._engine: Optional[AgentEngine] = None
@@ -163,6 +176,83 @@ class PlannerAgent:
         """Context manager exit."""
         self.shutdown()
 
+    # ==================== HITL Methods ====================
+
+    @property
+    def hitl(self) -> Optional[HITLGateway]:
+        """Access to HITL gateway for providing feedback."""
+        return self._hitl_gateway
+
+    @property
+    def is_awaiting_input(self) -> bool:
+        """Check if agent is waiting for human input."""
+        return self._hitl_gateway is not None and self._hitl_gateway.is_awaiting_feedback
+
+    def approve(self, message: Optional[str] = None) -> None:
+        """Approve the current pending item (plan, code, or answer).
+
+        Args:
+            message: Optional message to include
+        """
+        if self._hitl_gateway:
+            self._hitl_gateway.approve(message)
+
+    def reject(self, message: Optional[str] = None) -> None:
+        """Reject and abort execution.
+
+        Args:
+            message: Optional rejection reason
+        """
+        if self._hitl_gateway:
+            self._hitl_gateway.reject(message)
+
+    def modify_plan(self, new_plan: str, message: Optional[str] = None) -> None:
+        """Provide a modified plan.
+
+        Args:
+            new_plan: The modified plan text
+            message: Optional message
+        """
+        if self._hitl_gateway:
+            self._hitl_gateway.modify_plan(new_plan, message)
+
+    def modify_code(self, new_code: str, message: Optional[str] = None) -> None:
+        """Provide modified code.
+
+        Args:
+            new_code: The modified code
+            message: Optional message
+        """
+        if self._hitl_gateway:
+            self._hitl_gateway.modify_code(new_code, message)
+
+    def skip(self, message: Optional[str] = None) -> None:
+        """Skip the current step.
+
+        Args:
+            message: Optional message
+        """
+        if self._hitl_gateway:
+            self._hitl_gateway.skip(message)
+
+    def send_feedback(self, message: str) -> None:
+        """Send feedback to guide the agent.
+
+        Args:
+            message: Feedback message
+        """
+        if self._hitl_gateway:
+            self._hitl_gateway.send_feedback(message)
+
+    def provide_feedback(self, feedback: HumanFeedback) -> None:
+        """Provide complete feedback object.
+
+        Args:
+            feedback: HumanFeedback object
+        """
+        if self._hitl_gateway:
+            self._hitl_gateway.provide_feedback(feedback)
+
     def run(self, task: str) -> "AgentResult":
         """Run the agent on a task synchronously.
 
@@ -196,7 +286,7 @@ class PlannerAgent:
             context=self.context,
         )
 
-        # Create engine with run logger if available
+        # Create engine with run logger and HITL gateway if available
         self._engine = AgentEngine(
             config=self.config,
             executor=self.executor,
@@ -204,6 +294,7 @@ class PlannerAgent:
             notebook_builder=self._notebook,
             event_callback=self.event_callback,
             run_logger=self._run_logger,
+            hitl_gateway=self._hitl_gateway,
         )
 
         # Run the agent loop
