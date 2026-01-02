@@ -47,6 +47,5 @@ Con estos datos:
 - Analiza la tendencia de ingresos y márgenes
 - Visualiza el precio de la acción
 - Da una conclusión sobre la salud financiera de la empresa" \
-  --data "$SCRIPT_DIR/portfolio.csv" \
   --mcp-config "$SCRIPT_DIR/mcp.yaml" \
-  --model gpt-4o
+  --model claude-3-sonnet-20240229
