@@ -472,20 +472,27 @@ List files in 'data/' first to see what's available."""
     def serialize_state(self) -> str:
         """Serialize agent state for persistence.
 
+        TODO: This is experimental and incomplete. Current limitations:
+        - SessionState model fields don't match what's being serialized
+        - Jupyter kernel state (variables in memory) is NOT preserved
+        - Full session restore would require re-executing all cells
+
         Returns:
-            JSON string of agent state
+            JSON string of agent state (partial, for inspection only)
         """
         state = SessionState(
             session_id=self.config.session_id or "default",
             config=self.config,
             messages=self._engine.messages if self._engine else [],
-            round_num=self._engine.round_num if self._engine else 0,
-            current_plan=self._engine.current_plan if self._engine else None,
         )
         return state.model_dump_json(indent=2)
 
     def restore_state(self, state_json: str) -> None:
         """Restore agent state from persistence.
+
+        TODO: This is experimental and incomplete. Does NOT restore:
+        - Jupyter kernel state (variables, dataframes, models in memory)
+        - Would need to re-execute all previous cells to fully restore
 
         Args:
             state_json: JSON string of agent state
@@ -495,8 +502,6 @@ List files in 'data/' first to see what's available."""
 
         if self._engine:
             self._engine.messages = state.messages
-            self._engine.round_num = state.round_num
-            self._engine.current_plan = state.current_plan
 
 
 class AgentResult:

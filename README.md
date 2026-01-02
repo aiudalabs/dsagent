@@ -15,7 +15,6 @@ An AI-powered autonomous agent for data analysis with dynamic planning and persi
 - **Notebook Generation**: Automatically generates clean, runnable Jupyter notebooks
 - **Event Streaming**: Real-time events for UI integration
 - **Comprehensive Logging**: Full execution logs for debugging and ML retraining
-- **Session Management**: State persistence for multi-user scenarios
 - **Human-in-the-Loop**: Configurable checkpoints for human approval and feedback
 - **MCP Tools Support**: Connect to external tools via Model Context Protocol (web search, databases, etc.)
 
