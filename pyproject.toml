@@ -44,6 +44,9 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
+    # CLI
+    "rich>=13.0.0",
+    "prompt-toolkit>=3.0.0",
     # Data Science
     "numpy>=1.24.0",
     "pandas>=2.0.0",
@@ -73,6 +76,7 @@ mcp = [
 
 [project.scripts]
 dsagent = "dsagent.cli:main"
+dsagent-chat = "dsagent.cli.repl:main"
 
 [project.urls]
 Homepage = "https://github.com/nmlemus/dsagent"
