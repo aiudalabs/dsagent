@@ -21,7 +21,7 @@ from dsagent.session import Session, SessionManager, ConversationMessage
 from dsagent.schema.models import ExecutionResult, AgentConfig, PlanState, PlanStep, HITLMode
 from dsagent.core.planner import PlanParser
 from dsagent.core.hitl import HITLGateway
-from dsagent.utils.notebook import NotebookBuilder
+from dsagent.utils.notebook import NotebookBuilder, LiveNotebookBuilder, LiveNotebookSync, NotebookChange
 
 if TYPE_CHECKING:
     from dsagent.utils.logger import AgentLogger
@@ -175,6 +175,8 @@ class ConversationalAgentConfig:
     workspace: Path = field(default_factory=lambda: Path("./workspace"))
     hitl_mode: HITLMode = field(default_factory=lambda: HITLMode.NONE)
     hitl_timeout: float = 300.0
+    enable_live_notebook: bool = False  # Enable real-time notebook sync with Jupyter
+    enable_notebook_sync: bool = False  # Enable bidirectional sync (watches for user edits)
 
     @classmethod
     def from_agent_config(cls, config: AgentConfig) -> "ConversationalAgentConfig":
@@ -255,9 +257,13 @@ class ConversationalAgent:
         self._current_plan: Optional[PlanState] = None
         self._round_num = 0
 
-        # Notebook building
+        # Notebook building (can be NotebookBuilder, LiveNotebookBuilder, or LiveNotebookSync)
         self._notebook_builder: Optional[NotebookBuilder] = None
+        self._notebook_sync: Optional[LiveNotebookSync] = None
         self._current_task: Optional[str] = None  # First message becomes the task
+
+        # Callback for external notebook changes (user edits in Jupyter)
+        self._on_notebook_change: Optional[Callable[[List[NotebookChange]], None]] = None
 
         # HITL gateway
         self._hitl_gateway: Optional[HITLGateway] = None
@@ -297,11 +303,20 @@ class ConversationalAgent:
         on_plan_update: Optional[Callable[[PlanState], None]] = None,
         on_code_executing: Optional[Callable[[str], None]] = None,
         on_code_result: Optional[Callable[[ExecutionResult], None]] = None,
+        on_notebook_change: Optional[Callable[[List[NotebookChange]], None]] = None,
     ) -> None:
-        """Set callbacks for UI updates during autonomous execution."""
+        """Set callbacks for UI updates during autonomous execution.
+
+        Args:
+            on_plan_update: Called when plan state changes
+            on_code_executing: Called before code execution
+            on_code_result: Called after code execution
+            on_notebook_change: Called when user edits notebook in Jupyter
+        """
         self._on_plan_update = on_plan_update
         self._on_code_executing = on_code_executing
         self._on_code_result = on_code_result
+        self._on_notebook_change = on_notebook_change
 
     def start(self, session: Optional[Session] = None) -> None:
         """Start the agent and kernel.
@@ -353,6 +368,11 @@ class ConversationalAgent:
         """
         notebook_path = None
 
+        # Stop notebook sync if running
+        if self._notebook_sync:
+            self._notebook_sync.stop()
+            self._notebook_sync = None
+
         # Save notebook if we have any executions
         if save_notebook and self._notebook_builder:
             notebook_path = self.export_notebook()
@@ -387,6 +407,42 @@ class ConversationalAgent:
         """Build the system prompt with current context."""
         kernel_context = self._get_kernel_context()
         return CONVERSATIONAL_SYSTEM_PROMPT.format(kernel_context=kernel_context)
+
+    def _create_notebook_builder(self, task: str, workspace: Path) -> NotebookBuilder:
+        """Create the appropriate notebook builder based on configuration.
+
+        Args:
+            task: The user's task description
+            workspace: Workspace path
+
+        Returns:
+            NotebookBuilder, LiveNotebookBuilder, or LiveNotebookSync.builder
+        """
+        if self.config.enable_notebook_sync:
+            # Full bidirectional sync with Jupyter
+            self._notebook_sync = LiveNotebookSync(
+                task=task,
+                workspace=workspace,
+                on_external_change=self._on_notebook_change,
+            )
+            notebook_path = self._notebook_sync.start()
+            # Return the underlying builder so track_execution works
+            return self._notebook_sync.builder
+
+        elif self.config.enable_live_notebook:
+            # Live updates without bidirectional sync
+            return LiveNotebookBuilder(
+                task=task,
+                workspace=workspace,
+                auto_save=True,
+            )
+
+        else:
+            # Standard notebook builder (saves at end)
+            return NotebookBuilder(
+                task=task,
+                workspace=workspace,
+            )
 
     def _build_messages(self) -> List[Dict[str, str]]:
         """Build messages list for LLM from session history."""
@@ -581,10 +637,7 @@ class ConversationalAgent:
         if not self._notebook_builder:
             self._current_task = message
             workspace = Path(self._session.workspace_path) if self._session and self._session.workspace_path else self.config.workspace
-            self._notebook_builder = NotebookBuilder(
-                task=message,
-                workspace=workspace,
-            )
+            self._notebook_builder = self._create_notebook_builder(message, workspace)
 
         # Add user message to history
         if self._session:
@@ -760,10 +813,7 @@ class ConversationalAgent:
         if not self._notebook_builder:
             self._current_task = message
             workspace = Path(self._session.workspace_path) if self._session and self._session.workspace_path else self.config.workspace
-            self._notebook_builder = NotebookBuilder(
-                task=message,
-                workspace=workspace,
-            )
+            self._notebook_builder = self._create_notebook_builder(message, workspace)
 
         # Add user message to history
         if self._session:
@@ -961,6 +1011,18 @@ class ConversationalAgent:
             clean_notebook._notebooks_path = Path(self._session.notebooks_path)
 
         return clean_notebook.save(filename)
+
+    def get_live_notebook_path(self) -> Optional[Path]:
+        """Get the path to the live notebook file if live mode is enabled.
+
+        Returns:
+            Path to the live notebook, or None if not in live mode
+        """
+        if self._notebook_sync:
+            return self._notebook_sync.get_notebook_path()
+        elif isinstance(self._notebook_builder, LiveNotebookBuilder):
+            return self._notebook_builder.get_notebook_path()
+        return None
 
     def __enter__(self) -> "ConversationalAgent":
         """Context manager entry."""

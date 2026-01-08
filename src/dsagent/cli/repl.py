@@ -112,11 +112,15 @@ class ConversationalCLI:
         model: str = "gpt-4o",
         session_id: Optional[str] = None,
         hitl_mode: HITLMode = HITLMode.NONE,
+        enable_live_notebook: bool = False,
+        enable_notebook_sync: bool = False,
     ):
         self.workspace = Path(workspace).resolve()
         self.model = model
         self.initial_session_id = session_id
         self.hitl_mode = hitl_mode
+        self.enable_live_notebook = enable_live_notebook
+        self.enable_notebook_sync = enable_notebook_sync
 
         # Initialize components
         self.console = Console()
@@ -156,6 +160,8 @@ class ConversationalCLI:
                 model=self.ctx.model,
                 workspace=self.workspace,
                 hitl_mode=self.hitl_mode,
+                enable_live_notebook=self.enable_live_notebook,
+                enable_notebook_sync=self.enable_notebook_sync,
             )
             self._agent = ConversationalAgent(
                 config=config,
@@ -165,6 +171,35 @@ class ConversationalCLI:
             self._agent.start(self.ctx.session)
             # Make agent available to commands through context
             self.ctx._agent = self._agent
+
+            # Show live notebook path if enabled
+            if self.enable_live_notebook or self.enable_notebook_sync:
+                self.console.print(
+                    f"[cyan]Live notebook will be created on first message[/cyan]"
+                )
+
+            # Set up callback for notebook changes (if sync enabled)
+            if self.enable_notebook_sync:
+                def on_notebook_change(changes):
+                    for change in changes:
+                        if change.change_type == "cell_added":
+                            self.console.print(
+                                f"\n[yellow]📝 Jupyter: New cell detected at index {change.cell_index}[/yellow]"
+                            )
+                            if change.new_content:
+                                preview = change.new_content[:100]
+                                if len(change.new_content) > 100:
+                                    preview += "..."
+                                self.console.print(f"[dim]{preview}[/dim]")
+                        elif change.change_type == "cell_modified":
+                            self.console.print(
+                                f"\n[yellow]📝 Jupyter: Cell {change.cell_index} modified[/yellow]"
+                            )
+                        elif change.change_type == "cell_deleted":
+                            self.console.print(
+                                f"\n[yellow]📝 Jupyter: Cell {change.cell_index} deleted[/yellow]"
+                            )
+                self._agent.set_callbacks(on_notebook_change=on_notebook_change)
         return self._agent
 
     def _shutdown_agent(self) -> None:
@@ -177,15 +212,20 @@ class ConversationalCLI:
         """Print welcome message."""
         self.console.print()
 
-        hitl_info = ""
+        extra_info = ""
         if self.hitl_mode != HITLMode.NONE:
-            hitl_info = f"\n[yellow]HITL Mode: {self.hitl_mode.value}[/yellow] - You'll be asked to approve actions."
+            extra_info += f"\n[yellow]HITL Mode: {self.hitl_mode.value}[/yellow] - You'll be asked to approve actions."
+
+        if self.enable_notebook_sync:
+            extra_info += "\n[cyan]Live Notebook Sync: ON[/cyan] - Notebook updates in real-time, syncs with Jupyter."
+        elif self.enable_live_notebook:
+            extra_info += "\n[cyan]Live Notebook: ON[/cyan] - Notebook saves after each execution."
 
         self.console.print(
             Panel(
                 "[bold cyan]DSAgent[/bold cyan] - Conversational Data Science Agent\n\n"
                 "Type your message to chat with the agent, or use /help for commands.\n"
-                f"Use /new to start a new session, /quit to exit.{hitl_info}",
+                f"Use /new to start a new session, /quit to exit.{extra_info}",
                 title="Welcome",
                 border_style="cyan",
             )
@@ -206,6 +246,11 @@ class ConversationalCLI:
 
         if self.hitl_mode != HITLMode.NONE:
             parts.append(f"[yellow]hitl:{self.hitl_mode.value}[/yellow]")
+
+        if self.enable_notebook_sync:
+            parts.append("[cyan]sync[/cyan]")
+        elif self.enable_live_notebook:
+            parts.append("[cyan]live[/cyan]")
 
         status = " | ".join(parts)
         self.console.print(f"[dim]{status}[/dim]")
@@ -309,9 +354,17 @@ class ConversationalCLI:
             # Use streaming for progress updates
             round_num = 0
             plan_approved = False
+            notebook_path_shown = False
 
             for response in agent.chat_stream(message, on_code_execute=on_code_execute):
                 round_num += 1
+
+                # Show live notebook path on first response (if enabled)
+                if not notebook_path_shown and (self.enable_live_notebook or self.enable_notebook_sync):
+                    notebook_path = agent.get_live_notebook_path()
+                    if notebook_path:
+                        self.console.print(f"[dim]Live notebook: {notebook_path}[/dim]")
+                        notebook_path_shown = True
 
                 # Show plan if present and ask for HITL approval
                 if response.plan:
@@ -465,6 +518,7 @@ Examples:
   dsagent-chat --workspace ./out    # Use specific workspace
   dsagent-chat --hitl plan          # Require approval for plans
   dsagent-chat --hitl full          # Require approval for everything
+  dsagent-chat --live-notebook      # Enable live notebook sync
 
 HITL Modes:
   none        - No approval required (default)
@@ -472,6 +526,10 @@ HITL Modes:
   full        - Approve both plans and code
   plan_answer - Approve plans and final answers
   on_error    - Intervene only on errors
+
+Live Notebook:
+  --live-notebook   - Save notebook after each code execution (can open in Jupyter)
+  --notebook-sync   - Bidirectional sync (also detects user edits in Jupyter)
         """,
     )
 
@@ -504,6 +562,18 @@ HITL Modes:
         help="Human-in-the-loop mode (default: none)",
     )
 
+    parser.add_argument(
+        "--live-notebook",
+        action="store_true",
+        help="Enable live notebook (saves after each execution)",
+    )
+
+    parser.add_argument(
+        "--notebook-sync",
+        action="store_true",
+        help="Enable bidirectional notebook sync with Jupyter",
+    )
+
     args = parser.parse_args()
 
     # Validate configuration
@@ -531,6 +601,8 @@ HITL Modes:
         model=args.model,
         session_id=args.session,
         hitl_mode=hitl_mode,
+        enable_live_notebook=args.live_notebook,
+        enable_notebook_sync=args.notebook_sync,
     )
 
     try:

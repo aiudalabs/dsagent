@@ -172,9 +172,10 @@ class SessionsCommand(Command):
             }.get(s["status"], "?")
 
             current = " (current)" if ctx.session and s["id"] == ctx.session.id else ""
+            # Show enough of the ID to be unique (format: YYYYMMDD_HHMMSS_XXXXXX)
+            short_id = s['id'][:22] if len(s['id']) > 22 else s['id']
             lines.append(
-                f"  {status_icon} {s['name'][:30]:<30} "
-                f"[{s['id'][:8]}] "
+                f"  {status_icon} {s['name'][:25]:<25} [{short_id}] "
                 f"msgs:{s['message_count']}{current}"
             )
 
