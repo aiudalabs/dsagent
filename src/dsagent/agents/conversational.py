@@ -18,7 +18,7 @@ from litellm import completion
 
 from dsagent.kernel import LocalExecutor, ExecutorConfig, KernelIntrospector
 from dsagent.session import Session, SessionManager, ConversationMessage, SessionLogger
-from dsagent.utils.validation import validate_configuration
+from dsagent.utils.validation import validate_configuration, get_proxy_model_name
 from dsagent.schema.models import ExecutionResult, AgentConfig, PlanState, PlanStep, HITLMode
 from dsagent.core.planner import PlanParser
 from dsagent.core.hitl import HITLGateway
@@ -686,9 +686,11 @@ class ConversationalAgent:
             )
 
         start_time = time.time()
+        # Transform model name for proxy if LLM_API_BASE is set
+        model_name = get_proxy_model_name(self.config.model)
         try:
             response = completion(
-                model=self.config.model,
+                model=model_name,
                 messages=messages,
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
@@ -720,7 +722,7 @@ class ConversationalAgent:
             # Handle stop parameter not supported
             if "stop" in str(e).lower():
                 response = completion(
-                    model=self.config.model,
+                    model=model_name,
                     messages=messages,
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
