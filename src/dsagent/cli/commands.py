@@ -527,6 +527,121 @@ class DataCommand(Command):
         return CommandResult(success=False, message="Unknown error")
 
 
+class LogsCommand(Command):
+    """Show logs information and paths."""
+
+    name = "logs"
+    aliases = ["log"]
+    description = "Show logs path and recent events"
+    usage = "/logs [tail N]"
+
+    def execute(self, ctx: "CLIContext", args: List[str]) -> CommandResult:
+        from pathlib import Path
+
+        if not ctx.session:
+            return CommandResult(message="No active session")
+
+        if not ctx.session.logs_path:
+            return CommandResult(message="Logs path not configured for this session")
+
+        logs_path = Path(ctx.session.logs_path)
+
+        if not logs_path.exists():
+            return CommandResult(
+                message=f"Logs directory: {logs_path}\n(not created yet - will be created on first chat)"
+            )
+
+        lines = [
+            f"Logs directory: {logs_path}",
+            "",
+        ]
+
+        # Check for log files
+        run_log = logs_path / "run.log"
+        events_log = logs_path / "events.jsonl"
+
+        if run_log.exists():
+            size = run_log.stat().st_size
+            lines.append(f"  run.log: {size:,} bytes")
+        else:
+            lines.append("  run.log: (not created)")
+
+        if events_log.exists():
+            size = events_log.stat().st_size
+            # Count events
+            with open(events_log, "r") as f:
+                event_count = sum(1 for _ in f)
+            lines.append(f"  events.jsonl: {event_count} events ({size:,} bytes)")
+        else:
+            lines.append("  events.jsonl: (not created)")
+
+        # Show tail of run.log if requested
+        if args and args[0] == "tail":
+            n = 20
+            if len(args) > 1:
+                try:
+                    n = int(args[1])
+                except ValueError:
+                    pass
+
+            if run_log.exists():
+                lines.append("")
+                lines.append(f"Last {n} lines of run.log:")
+                lines.append("─" * 50)
+                with open(run_log, "r") as f:
+                    all_lines = f.readlines()
+                    for line in all_lines[-n:]:
+                        lines.append(line.rstrip())
+
+        lines.append("")
+        lines.append("Use '/logs tail [N]' to see recent log entries")
+
+        return CommandResult(message="\n".join(lines))
+
+
+class SummaryCommand(Command):
+    """Show conversation summary."""
+
+    name = "summary"
+    aliases = ["sum"]
+    description = "Show the conversation summary (if any)"
+    usage = "/summary"
+
+    def execute(self, ctx: "CLIContext", args: List[str]) -> CommandResult:
+        if not ctx.session:
+            return CommandResult(message="No active session")
+
+        history = ctx.session.history
+
+        if not history.summary:
+            return CommandResult(
+                message="No summary yet.\n"
+                f"Current messages: {len(history.messages)}\n"
+                f"Summarization threshold: 30 messages\n"
+                "Summary will be created automatically when threshold is exceeded."
+            )
+
+        lines = [
+            "═" * 60,
+            "CONVERSATION SUMMARY",
+            "═" * 60,
+            "",
+            history.summary,
+            "",
+            "─" * 60,
+            f"Messages summarized: {history.summary_messages_count}",
+            f"Total truncated: {history.truncated_count}",
+            f"Current messages: {len(history.messages)}",
+        ]
+
+        if history.summary_created_at:
+            lines.append(f"Created at: {history.summary_created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        lines.append("─" * 60)
+
+        return CommandResult(message="\n".join(lines))
+
+
 class WorkspaceCommand(Command):
     """Show workspace information."""
 
@@ -582,6 +697,8 @@ def create_default_registry() -> CommandRegistry:
         ContextCommand(),
         VarsCommand(),
         HistoryCommand(),
+        SummaryCommand(),
+        LogsCommand(),
         ExportCommand(),
         ClearCommand(),
         QuitCommand(),

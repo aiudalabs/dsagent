@@ -220,23 +220,32 @@ class IntentClassifier:
 
 ## FASE 5: Memoria y Contexto Largo
 
-**Estado:** [ ] Pendiente
+**Estado:** [x] COMPLETADA (2026-01-07) - Implementada Option A: Summarization
 
-### 5.1 Memory Store
+### 5.1 Memory Module
 ```
 src/dsagent/memory/
-├── store.py          # VectorStore para embeddings
-├── summarizer.py     # Sumarizador de conversaciones
-└── retriever.py      # RAG para contexto relevante
+├── __init__.py       # Exporta ConversationSummarizer, SummaryConfig, ConversationSummary
+└── summarizer.py     # Sumarizador de conversaciones usando LLM
 ```
 
-### 5.2 Sumarización Automática
-- Cuando conversación > N mensajes:
-  - Sumarizar mensajes antiguos
-  - Mantener últimos K mensajes completos
-  - Almacenar sumario en memoria
+### 5.2 Sumarización Automática ✓
+- Cuando conversación > N mensajes (configurable, default 30):
+  - Sumarizar mensajes antiguos usando modelo LLM (gpt-4o-mini por defecto)
+  - Mantener últimos K mensajes completos (configurable, default 10)
+  - Almacenar sumario en ConversationHistory
+  - Sumario inyectado automáticamente en contexto LLM
+- `ConversationSummarizer`: Clase principal para sumarización
+- `SummaryConfig`: Configuración (max_messages, keep_recent, model, temperature)
+- `ConversationSummary`: Modelo para representar sumarios
+- Fallback a sumario simple si LLM falla
 
-### 5.3 Retrieval Augmented Context
+### 5.3 Integración con ConversationalAgent ✓
+- Config options: enable_summarization, summarization_threshold, keep_recent_messages, summarization_model
+- Auto-summarize después de cada `chat()` y `chat_stream()`
+- Sumarios incluyen: datos cargados, análisis realizados, modelos entrenados, hallazgos clave, estado del kernel
+
+### 5.4 Retrieval Augmented Context (Futuro)
 - Embeddings de mensajes/ejecuciones pasadas
 - Recuperar contexto relevante para query actual
 - Inyectar en prompt
@@ -342,7 +351,7 @@ GET  /sessions/{id}/notebook # Exportar notebook
 | 2 - Kernel State | Alta | Fase 1 | Alta | [x] COMPLETADA |
 | 4 - Agent Conversacional | Alta | Fases 1-3 | Alta | [x] COMPLETADA |
 | 6 - Notebook Vivo | Media | Fase 4 | Baja | [x] COMPLETADA |
-| 5 - Memoria Larga | Media | Fase 4 | Alta | [ ] |
+| 5 - Memoria Larga | Media | Fase 4 | Alta | [x] COMPLETADA |
 | 7 - Herramientas | Baja | Fase 4 | Media | [ ] |
 | 8 - API/Integrations | Baja | Todas | Media | [ ] |
 
@@ -394,6 +403,15 @@ src/dsagent/
 
 | Fecha | Fase | Cambios |
 |-------|------|---------|
+| 2026-01-07 | 5 | Fase 5 completada: Memoria Larga (Option A: Summarization) |
+| - | - | - `memory/__init__.py`: Módulo de memoria con exports |
+| - | - | - `memory/summarizer.py`: ConversationSummarizer, SummaryConfig, ConversationSummary |
+| - | - | - `session/models.py`: Métodos de sumario en ConversationHistory (set_summary, apply_summary, etc.) |
+| - | - | - `agents/conversational.py`: Integración de summarizer con auto-summarize |
+| - | - | - `agents/conversational.py`: Config options para summarization (enable, threshold, model) |
+| - | - | - `tests/test_summarization.py`: 25 tests para funcionalidad de summarization |
+| - | - | - Sumarios inyectados automáticamente en contexto LLM |
+| - | - | - Fallback a sumario simple si LLM falla |
 | 2026-01-07 | 6 | Fase 6 completada: Notebook Vivo (Live Notebook) |
 | - | - | - `utils/notebook.py`: LiveNotebookBuilder con auto-save atómico después de cada celda |
 | - | - | - `utils/notebook.py`: JupyterFileWatcher usando watchdog para detectar cambios externos |

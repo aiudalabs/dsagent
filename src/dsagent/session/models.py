@@ -104,6 +104,8 @@ class ConversationHistory(BaseModel):
 
     Handles the conversation history for a session, providing methods
     for adding messages, truncation, and preparing context for LLM calls.
+
+    Supports automatic summarization when conversations exceed limits.
     """
 
     messages: List[ConversationMessage] = Field(default_factory=list)
@@ -115,7 +117,9 @@ class ConversationHistory(BaseModel):
 
     # Summary of truncated messages
     summary: Optional[str] = None
-    truncated_count: int = 0
+    summary_messages_count: int = 0  # How many messages the summary covers
+    summary_created_at: Optional[datetime] = None
+    truncated_count: int = 0  # Total messages ever truncated
 
     def add(self, message: ConversationMessage) -> None:
         """Add a message to the history."""
@@ -230,6 +234,64 @@ class ConversationHistory(BaseModel):
             # Rebuild messages
             self.messages = system_msgs + to_keep
 
+    def set_summary(
+        self,
+        summary_text: str,
+        messages_covered: int,
+    ) -> None:
+        """Set the conversation summary.
+
+        Args:
+            summary_text: The summary content
+            messages_covered: Number of messages this summary covers
+        """
+        self.summary = summary_text
+        self.summary_messages_count = messages_covered
+        self.summary_created_at = datetime.now()
+
+    def needs_summarization(self, threshold: int = 30) -> bool:
+        """Check if the conversation needs summarization.
+
+        Args:
+            threshold: Message count threshold for triggering summarization
+
+        Returns:
+            True if summarization is recommended
+        """
+        return len(self.messages) > threshold
+
+    def get_messages_for_summary(self, keep_recent: int = 10) -> List[ConversationMessage]:
+        """Get messages that should be summarized.
+
+        Args:
+            keep_recent: Number of recent messages to exclude from summary
+
+        Returns:
+            List of messages to summarize
+        """
+        if len(self.messages) <= keep_recent:
+            return []
+        return self.messages[:-keep_recent]
+
+    def apply_summary(self, keep_recent: int = 10) -> int:
+        """Apply summarization by removing old messages.
+
+        Call this after setting the summary to actually truncate messages.
+
+        Args:
+            keep_recent: Number of recent messages to keep
+
+        Returns:
+            Number of messages removed
+        """
+        if len(self.messages) <= keep_recent:
+            return 0
+
+        removed_count = len(self.messages) - keep_recent
+        self.messages = self.messages[-keep_recent:]
+        self.truncated_count += removed_count
+        return removed_count
+
     def clear(self, keep_system: bool = True) -> None:
         """Clear conversation history."""
         if keep_system:
@@ -328,6 +390,7 @@ class Session(BaseModel):
     data_path: Optional[str] = None
     artifacts_path: Optional[str] = None
     notebooks_path: Optional[str] = None
+    logs_path: Optional[str] = None
 
     # Plan state (from existing models)
     plan_raw: Optional[str] = None
@@ -351,6 +414,7 @@ class Session(BaseModel):
         self.data_path = str(workspace / "data")
         self.artifacts_path = str(workspace / "artifacts")
         self.notebooks_path = str(workspace / "notebooks")
+        self.logs_path = str(workspace / "logs")
 
     def add_message(self, message: ConversationMessage) -> None:
         """Add a message to the session history."""

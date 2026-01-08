@@ -356,7 +356,52 @@ class ConversationalCLI:
             plan_approved = False
             notebook_path_shown = False
 
-            for response in agent.chat_stream(message, on_code_execute=on_code_execute):
+            # Show thinking indicator while waiting for first response
+            with self.console.status("[bold cyan]Thinking...[/bold cyan]", spinner="dots") as status:
+                response_gen = agent.chat_stream(message, on_code_execute=on_code_execute)
+                # Get first response (this is where LLM call happens)
+                try:
+                    first_response = next(response_gen)
+                except StopIteration:
+                    return
+
+            # Process first response
+            round_num = 1
+
+            # Show live notebook path on first response (if enabled)
+            if not notebook_path_shown and (self.enable_live_notebook or self.enable_notebook_sync):
+                notebook_path = agent.get_live_notebook_path()
+                if notebook_path:
+                    self.console.print(f"[dim]Live notebook: {notebook_path}[/dim]")
+                    notebook_path_shown = True
+
+            # Show plan if present and ask for HITL approval
+            if first_response.plan:
+                self._display_plan(first_response.plan, round_num)
+
+                # HITL: Ask for plan approval on first plan
+                if not plan_approved and self.hitl_mode in (HITLMode.PLAN_ONLY, HITLMode.PLAN_AND_ANSWER, HITLMode.FULL):
+                    plan_text = "\n".join(
+                        f"{s.number}. {'[x]' if s.completed else '[ ]'} {s.description}"
+                        for s in first_response.plan.steps
+                    )
+                    if not self._prompt_hitl_approval("Plan", plan_text):
+                        self.console.print("[yellow]Execution stopped by user[/yellow]")
+                        return
+                    plan_approved = True
+
+            # Display the first response
+            self._display_response(first_response, round_num)
+
+            # Continue with remaining responses (autonomous execution)
+            while True:
+                # Show thinking indicator for next round
+                with self.console.status(f"[bold cyan]Thinking... (round {round_num + 1})[/bold cyan]", spinner="dots"):
+                    try:
+                        response = next(response_gen)
+                    except StopIteration:
+                        break
+
                 round_num += 1
 
                 # Show live notebook path on first response (if enabled)

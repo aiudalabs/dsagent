@@ -13,7 +13,11 @@ class ConfigurationError(Exception):
 
 
 def apply_llm_api_base(model: str) -> None:
-    """Map LLM_API_BASE to provider-specific base env vars when appropriate."""
+    """Map LLM_API_BASE to provider-specific base env vars when appropriate.
+
+    This allows using a single LLM_API_BASE env var (e.g., LiteLLM proxy)
+    for all models instead of configuring each provider separately.
+    """
     api_base = os.getenv("LLM_API_BASE")
     if not api_base:
         return
@@ -25,6 +29,12 @@ def apply_llm_api_base(model: str) -> None:
         target_env = "AZURE_API_BASE"
     elif model_lower.startswith(("gpt-", "o1", "o3", "openai/")):
         target_env = "OPENAI_API_BASE"
+    elif model_lower.startswith(("claude", "anthropic/")):
+        target_env = "ANTHROPIC_BASE_URL"
+    elif model_lower.startswith(("gemini", "google/")):
+        target_env = "GOOGLE_API_BASE"
+    elif model_lower.startswith("deepseek/"):
+        target_env = "DEEPSEEK_API_BASE"
 
     if target_env and not os.getenv(target_env):
         os.environ[target_env] = api_base

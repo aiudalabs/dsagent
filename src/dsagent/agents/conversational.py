@@ -17,11 +17,13 @@ from typing import Any, Callable, Dict, Generator, List, Optional, TYPE_CHECKING
 from litellm import completion
 
 from dsagent.kernel import LocalExecutor, ExecutorConfig, KernelIntrospector
-from dsagent.session import Session, SessionManager, ConversationMessage
+from dsagent.session import Session, SessionManager, ConversationMessage, SessionLogger
+from dsagent.utils.validation import validate_configuration
 from dsagent.schema.models import ExecutionResult, AgentConfig, PlanState, PlanStep, HITLMode
 from dsagent.core.planner import PlanParser
 from dsagent.core.hitl import HITLGateway
 from dsagent.utils.notebook import NotebookBuilder, LiveNotebookBuilder, LiveNotebookSync, NotebookChange
+from dsagent.memory import ConversationSummarizer, SummaryConfig
 
 if TYPE_CHECKING:
     from dsagent.utils.logger import AgentLogger
@@ -178,6 +180,15 @@ class ConversationalAgentConfig:
     enable_live_notebook: bool = False  # Enable real-time notebook sync with Jupyter
     enable_notebook_sync: bool = False  # Enable bidirectional sync (watches for user edits)
 
+    # Summarization settings (Phase 5)
+    enable_summarization: bool = True  # Auto-summarize long conversations
+    summarization_threshold: int = 30  # Summarize when messages exceed this
+    keep_recent_messages: int = 10  # Keep this many recent messages after summarization
+    summarization_model: str = "gpt-4o-mini"  # Cheaper model for summarization
+
+    # Logging settings
+    enable_logging: bool = True  # Enable event logging to files (run.log, events.jsonl)
+
     @classmethod
     def from_agent_config(cls, config: AgentConfig) -> "ConversationalAgentConfig":
         """Create from AgentConfig."""
@@ -273,6 +284,12 @@ class ConversationalAgent:
                 timeout=self.config.hitl_timeout
             )
 
+        # Summarizer for long conversations (Phase 5)
+        self._summarizer: Optional[ConversationSummarizer] = None
+
+        # Session logger for event logging
+        self._session_logger: Optional[SessionLogger] = None
+
         # Callbacks for UI updates
         self._on_plan_update: Optional[Callable[[PlanState], None]] = None
         self._on_code_executing: Optional[Callable[[str], None]] = None
@@ -327,6 +344,9 @@ class ConversationalAgent:
         if self._started:
             return
 
+        # Validate model configuration and apply API base mapping
+        validate_configuration(self.config.model)
+
         # Set up session
         if session:
             self._session = session
@@ -343,6 +363,14 @@ class ConversationalAgent:
         # Create subdirectories
         (workspace / "data").mkdir(exist_ok=True)
         (workspace / "artifacts").mkdir(exist_ok=True)
+        (workspace / "logs").mkdir(exist_ok=True)
+
+        # Initialize session logger
+        if self.config.enable_logging and self._session:
+            self._session_logger = SessionLogger(
+                session=self._session,
+                enabled=True,
+            )
 
         # Initialize executor
         executor_config = ExecutorConfig(
@@ -354,6 +382,15 @@ class ConversationalAgent:
 
         # Initialize introspector
         self._introspector = KernelIntrospector.from_executor(self._executor)
+
+        # Initialize summarizer for long conversations (Phase 5)
+        if self.config.enable_summarization:
+            summary_config = SummaryConfig(
+                max_messages=self.config.summarization_threshold,
+                keep_recent=self.config.keep_recent_messages,
+                model=self.config.summarization_model,
+            )
+            self._summarizer = ConversationSummarizer(config=summary_config)
 
         self._started = True
 
@@ -367,6 +404,11 @@ class ConversationalAgent:
             Path to saved notebook if save_notebook=True and there was content
         """
         notebook_path = None
+
+        # Close session logger
+        if self._session_logger:
+            self._session_logger.close()
+            self._session_logger = None
 
         # Stop notebook sync if running
         if self._notebook_sync:
@@ -458,6 +500,82 @@ class ConversationalAgent:
 
         return messages
 
+    def _maybe_summarize(self) -> bool:
+        """Check if summarization is needed and perform it.
+
+        Automatically summarizes conversation history when it exceeds
+        the configured threshold, keeping only recent messages.
+
+        Returns:
+            True if summarization was performed
+        """
+        if not self._summarizer or not self._session:
+            return False
+
+        history = self._session.history
+
+        # Check if we need to summarize
+        if not self._summarizer.should_summarize(history.messages):
+            return False
+
+        # Get kernel state for context
+        kernel_state = None
+        if self._session.kernel_snapshot:
+            kernel_state = {
+                "variables": self._session.kernel_snapshot.variables,
+                "dataframes": self._session.kernel_snapshot.dataframes,
+                "imports": self._session.kernel_snapshot.imports,
+            }
+
+        # Get existing summary if any
+        existing_summary = None
+        if history.summary:
+            from dsagent.memory import ConversationSummary
+            existing_summary = ConversationSummary(
+                content=history.summary,
+                messages_summarized=history.summary_messages_count,
+            )
+
+        # Perform summarization
+        try:
+            summary = self._summarizer.summarize(
+                messages=history.messages,
+                kernel_state=kernel_state,
+                existing_summary=existing_summary,
+            )
+
+            # Apply summary to history
+            history.set_summary(summary.content, summary.messages_summarized)
+            removed = history.apply_summary(
+                keep_recent=self.config.keep_recent_messages
+            )
+
+            # Save session with updated summary
+            if self._session_manager:
+                self._session_manager.save_session(self._session)
+
+            # Log summarization event
+            if self._session_logger:
+                self._session_logger.log_summarization(
+                    messages_summarized=removed,
+                    messages_kept=len(history.messages),
+                )
+
+            if self.logger:
+                self.logger.info(
+                    f"Summarized conversation: removed {removed} messages, "
+                    f"keeping {len(history.messages)} recent"
+                )
+
+            return True
+
+        except Exception as e:
+            if self._session_logger:
+                self._session_logger.log_error(str(e), error_type="summarization_error")
+            if self.logger:
+                self.logger.error(f"Summarization failed: {e}")
+            return False
+
     def _extract_code(self, text: str) -> Optional[str]:
         """Extract code from <code> tags or markdown code blocks."""
         # Try <code> tags first (complete)
@@ -502,11 +620,51 @@ class ConversationalAgent:
         return None
 
     def _extract_thinking(self, text: str) -> Optional[str]:
-        """Extract thinking from <think> tags."""
+        """Extract thinking from <think> tags in text."""
         match = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
         if match:
             return match.group(1).strip()
         return None
+
+    def _extract_thinking_from_response(self, response: Any) -> Optional[str]:
+        """Extract thinking/reasoning from LLM response.
+
+        Checks multiple locations where thinking might be stored:
+        - Claude's extended thinking (reasoning_content)
+        - Response content blocks with thinking type
+        - <think> tags in content
+        """
+        thinking_parts = []
+
+        try:
+            message = response.choices[0].message
+
+            # Check for Claude's reasoning_content (extended thinking)
+            if hasattr(message, 'reasoning_content') and message.reasoning_content:
+                thinking_parts.append(message.reasoning_content)
+
+            # Check for thinking in content blocks (Claude format)
+            if hasattr(message, 'content') and isinstance(message.content, list):
+                for block in message.content:
+                    if hasattr(block, 'type') and block.type == 'thinking':
+                        if hasattr(block, 'thinking'):
+                            thinking_parts.append(block.thinking)
+
+            # Check for thinking in tool_calls or other attributes
+            if hasattr(message, 'thinking') and message.thinking:
+                thinking_parts.append(message.thinking)
+
+            # Also extract from <think> tags in content
+            content = message.content if isinstance(message.content, str) else ""
+            if content:
+                think_match = self._extract_thinking(content)
+                if think_match:
+                    thinking_parts.append(think_match)
+
+        except Exception:
+            pass  # Silently ignore extraction errors
+
+        return "\n\n".join(thinking_parts) if thinking_parts else None
 
     def _extract_plan(self, text: str) -> Optional[PlanState]:
         """Extract plan from <plan> tags."""
@@ -518,6 +676,16 @@ class ConversationalAgent:
 
     def _call_llm(self, messages: List[Dict[str, str]]) -> str:
         """Call the LLM and return response text."""
+        # Log request
+        if self._session_logger:
+            self._session_logger.log_llm_request(
+                model=self.config.model,
+                messages_count=len(messages),
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+            )
+
+        start_time = time.time()
         try:
             response = completion(
                 model=self.config.model,
@@ -526,7 +694,28 @@ class ConversationalAgent:
                 max_tokens=self.config.max_tokens,
                 stop=self.STOP_SEQUENCES,
             )
-            return response.choices[0].message.content or ""
+            content = response.choices[0].message.content or ""
+            latency_ms = (time.time() - start_time) * 1000
+
+            # Extract thinking from Claude responses (if present)
+            thinking = self._extract_thinking_from_response(response)
+            if thinking and self._session_logger:
+                self._session_logger.log_thinking(thinking)
+
+            # Log response
+            if self._session_logger:
+                tokens = getattr(response.usage, 'total_tokens', 0) if response.usage else 0
+                self._session_logger.log_llm_response(
+                    response=content,
+                    tokens_used=tokens,
+                    latency_ms=latency_ms,
+                    model=self.config.model,
+                    has_code="<code>" in content,
+                    has_plan="<plan>" in content,
+                    has_answer="<answer>" in content,
+                )
+
+            return content
         except Exception as e:
             # Handle stop parameter not supported
             if "stop" in str(e).lower():
@@ -536,7 +725,31 @@ class ConversationalAgent:
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
                 )
-                return response.choices[0].message.content or ""
+                content = response.choices[0].message.content or ""
+                latency_ms = (time.time() - start_time) * 1000
+
+                # Extract thinking from Claude responses (if present)
+                thinking = self._extract_thinking_from_response(response)
+                if thinking and self._session_logger:
+                    self._session_logger.log_thinking(thinking)
+
+                if self._session_logger:
+                    tokens = getattr(response.usage, 'total_tokens', 0) if response.usage else 0
+                    self._session_logger.log_llm_response(
+                        response=content,
+                        tokens_used=tokens,
+                        latency_ms=latency_ms,
+                        model=self.config.model,
+                        has_code="<code>" in content,
+                        has_plan="<plan>" in content,
+                        has_answer="<answer>" in content,
+                    )
+
+                return content
+
+            # Log error
+            if self._session_logger:
+                self._session_logger.log_error(str(e), error_type="llm_error")
             raise
 
     def _execute_code(self, code: str, step_desc: str = "") -> ExecutionResult:
@@ -555,10 +768,23 @@ class ConversationalAgent:
         if self._on_code_executing:
             self._on_code_executing(code)
 
+        start_time = time.time()
         result = self._executor.execute(code)
+        execution_time_ms = (time.time() - start_time) * 1000
 
         if self._on_code_result:
             self._on_code_result(result)
+
+        # Log code execution
+        if self._session_logger:
+            self._session_logger.log_code_execution(
+                code=code,
+                success=result.success,
+                output=result.output or "",
+                error=result.error,
+                images_count=len(result.images) if result.images else 0,
+                execution_time_ms=execution_time_ms,
+            )
 
         # Track execution for notebook generation
         if self._notebook_builder:
@@ -643,12 +869,25 @@ class ConversationalAgent:
         if self._session:
             self._session.history.add_user(message)
 
+        # Log user message
+        if self._session_logger:
+            self._session_logger.log_user_message(message)
+
         # Build messages and call LLM
         messages = self._build_messages()
         response_text = self._call_llm(messages)
 
         # Parse initial response
         response = self._parse_response(response_text)
+
+        # Log plan if present
+        if response.plan and self._session_logger:
+            completed = sum(1 for s in response.plan.steps if s.completed)
+            self._session_logger.log_plan_update(
+                plan_text=response.plan.raw_text or "",
+                completed_steps=completed,
+                total_steps=len(response.plan.steps),
+            )
 
         # Execute code if present
         if response.code:
@@ -679,6 +918,9 @@ class ConversationalAgent:
         # If there's a plan and it's not complete, continue autonomously
         if response.plan and not response.is_complete:
             response = self._run_autonomous(response)
+
+        # Check if we need to summarize the conversation (Phase 5)
+        self._maybe_summarize()
 
         return response
 
@@ -819,12 +1061,25 @@ class ConversationalAgent:
         if self._session:
             self._session.history.add_user(message)
 
+        # Log user message
+        if self._session_logger:
+            self._session_logger.log_user_message(message)
+
         # Build messages and call LLM
         messages = self._build_messages()
         response_text = self._call_llm(messages)
 
         # Parse initial response
         response = self._parse_response(response_text)
+
+        # Log plan if present
+        if response.plan and self._session_logger:
+            completed = sum(1 for s in response.plan.steps if s.completed)
+            self._session_logger.log_plan_update(
+                plan_text=response.plan.raw_text or "",
+                completed_steps=completed,
+                total_steps=len(response.plan.steps),
+            )
 
         # Execute code if present
         if response.code:
@@ -851,6 +1106,9 @@ class ConversationalAgent:
         # If there's a plan, continue yielding responses
         if response.plan and not response.is_complete:
             yield from self._run_autonomous_stream(response, on_code_execute)
+
+        # Check if we need to summarize the conversation (Phase 5)
+        self._maybe_summarize()
 
     def _run_autonomous_stream(
         self,

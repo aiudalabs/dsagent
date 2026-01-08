@@ -10,6 +10,7 @@ from dsagent.session.models import (
 )
 from dsagent.session.store import SessionStore
 from dsagent.session.manager import SessionManager
+from dsagent.session.logger import SessionLogger
 
 __all__ = [
     "ConversationMessage",
@@ -20,4 +21,5 @@ __all__ = [
     "ConversationHistory",
     "SessionStore",
     "SessionManager",
+    "SessionLogger",
 ]
