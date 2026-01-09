@@ -23,6 +23,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from dsagent.cli.banner import print_welcome
 from dsagent.cli.commands import CommandRegistry, CommandResult, create_default_registry
 from dsagent.cli.renderer import CLIRenderer
 from dsagent.session import Session, SessionManager
@@ -114,6 +115,7 @@ class ConversationalCLI:
         hitl_mode: HITLMode = HITLMode.NONE,
         enable_live_notebook: bool = False,
         enable_notebook_sync: bool = False,
+        mcp_config: Optional[Path] = None,
     ):
         self.workspace = Path(workspace).resolve()
         self.model = model
@@ -121,6 +123,7 @@ class ConversationalCLI:
         self.hitl_mode = hitl_mode
         self.enable_live_notebook = enable_live_notebook
         self.enable_notebook_sync = enable_notebook_sync
+        self.mcp_config = mcp_config
 
         # Initialize components
         self.console = Console()
@@ -162,6 +165,7 @@ class ConversationalCLI:
                 hitl_mode=self.hitl_mode,
                 enable_live_notebook=self.enable_live_notebook,
                 enable_notebook_sync=self.enable_notebook_sync,
+                mcp_config=self.mcp_config,
             )
             self._agent = ConversationalAgent(
                 config=config,
@@ -209,28 +213,22 @@ class ConversationalCLI:
             self._agent = None
 
     def _print_welcome(self) -> None:
-        """Print welcome message."""
-        self.console.print()
+        """Print welcome message with ASCII banner."""
+        # Show ASCII art banner
+        session_id = self.ctx.session.id if self.ctx.session else ""
+        print_welcome(self.console, model=self.model, session_id=session_id)
 
-        extra_info = ""
+        # Show additional mode info
         if self.hitl_mode != HITLMode.NONE:
-            extra_info += f"\n[yellow]HITL Mode: {self.hitl_mode.value}[/yellow] - You'll be asked to approve actions."
+            self.console.print(f"  [yellow]HITL Mode: {self.hitl_mode.value}[/yellow] - You'll be asked to approve actions.")
 
         if self.enable_notebook_sync:
-            extra_info += "\n[cyan]Live Notebook Sync: ON[/cyan] - Notebook updates in real-time, syncs with Jupyter."
+            self.console.print("  [cyan]Live Notebook Sync: ON[/cyan] - Notebook updates in real-time, syncs with Jupyter.")
         elif self.enable_live_notebook:
-            extra_info += "\n[cyan]Live Notebook: ON[/cyan] - Notebook saves after each execution."
+            self.console.print("  [cyan]Live Notebook: ON[/cyan] - Notebook saves after each execution.")
 
-        self.console.print(
-            Panel(
-                "[bold cyan]DSAgent[/bold cyan] - Conversational Data Science Agent\n\n"
-                "Type your message to chat with the agent, or use /help for commands.\n"
-                f"Use /new to start a new session, /quit to exit.{extra_info}",
-                title="Welcome",
-                border_style="cyan",
-            )
-        )
-        self.console.print()
+        if self.hitl_mode != HITLMode.NONE or self.enable_notebook_sync or self.enable_live_notebook:
+            self.console.print()
 
     def _print_status_bar(self) -> None:
         """Print current status."""
@@ -564,6 +562,7 @@ Examples:
   dsagent-chat --hitl plan          # Require approval for plans
   dsagent-chat --hitl full          # Require approval for everything
   dsagent-chat --live-notebook      # Enable live notebook sync
+  dsagent-chat --mcp-config ~/.dsagent/mcp.yaml  # Use MCP tools
 
 HITL Modes:
   none        - No approval required (default)
@@ -619,6 +618,13 @@ Live Notebook:
         help="Enable bidirectional notebook sync with Jupyter",
     )
 
+    parser.add_argument(
+        "--mcp-config",
+        type=str,
+        default=None,
+        help="Path to MCP servers YAML config file (e.g., ~/.dsagent/mcp.yaml)",
+    )
+
     args = parser.parse_args()
 
     # Validate configuration
@@ -640,6 +646,15 @@ Live Notebook:
     }
     hitl_mode = hitl_mode_map.get(args.hitl, HITLMode.NONE)
 
+    # Validate MCP config if provided
+    mcp_config_path = None
+    if args.mcp_config:
+        mcp_config_path = Path(args.mcp_config).expanduser().resolve()
+        if not mcp_config_path.exists():
+            console = Console()
+            console.print(f"[red]Error: MCP config file not found: {mcp_config_path}[/red]")
+            sys.exit(1)
+
     # Run the CLI
     cli = ConversationalCLI(
         workspace=Path(args.workspace),
@@ -648,6 +663,7 @@ Live Notebook:
         hitl_mode=hitl_mode,
         enable_live_notebook=args.live_notebook,
         enable_notebook_sync=args.notebook_sync,
+        mcp_config=mcp_config_path,
     )
 
     try:
@@ -656,6 +672,63 @@ Live Notebook:
         console = Console()
         console.print(f"[red]Error: {e}[/red]")
         sys.exit(1)
+
+
+def run_chat(args) -> int:
+    """Run chat with args from main CLI.
+
+    Args:
+        args: Namespace with model, workspace, session, hitl, etc.
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from dsagent.utils.validation import validate_configuration
+
+    console = Console()
+
+    # Validate configuration
+    try:
+        validate_configuration(args.model)
+    except Exception as e:
+        console.print(f"[red]Configuration Error: {e}[/red]")
+        return 1
+
+    # Convert HITL mode string to enum
+    hitl_mode_map = {
+        "none": HITLMode.NONE,
+        "plan": HITLMode.PLAN_ONLY,
+        "full": HITLMode.FULL,
+        "plan_answer": HITLMode.PLAN_AND_ANSWER,
+        "on_error": HITLMode.ON_ERROR,
+    }
+    hitl_mode = hitl_mode_map.get(args.hitl, HITLMode.NONE)
+
+    # Validate MCP config if provided
+    mcp_config_path = None
+    if args.mcp_config:
+        mcp_config_path = Path(args.mcp_config).expanduser().resolve()
+        if not mcp_config_path.exists():
+            console.print(f"[red]Error: MCP config file not found: {mcp_config_path}[/red]")
+            return 1
+
+    # Run the CLI
+    cli = ConversationalCLI(
+        workspace=Path(args.workspace),
+        model=args.model,
+        session_id=getattr(args, 'session', None),
+        hitl_mode=hitl_mode,
+        enable_live_notebook=getattr(args, 'live_notebook', False),
+        enable_notebook_sync=getattr(args, 'notebook_sync', False),
+        mcp_config=mcp_config_path,
+    )
+
+    try:
+        cli.run()
+        return 0
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        return 1
 
 
 if __name__ == "__main__":

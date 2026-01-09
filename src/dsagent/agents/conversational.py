@@ -27,6 +27,8 @@ from dsagent.memory import ConversationSummarizer, SummaryConfig
 
 if TYPE_CHECKING:
     from dsagent.utils.logger import AgentLogger
+    from dsagent.tools.mcp_manager import MCPManager
+    from dsagent.tools.config import MCPConfig
 
 
 class ExecutionMode(str, Enum):
@@ -189,6 +191,9 @@ class ConversationalAgentConfig:
     # Logging settings
     enable_logging: bool = True  # Enable event logging to files (run.log, events.jsonl)
 
+    # MCP settings
+    mcp_config: Optional[Any] = None  # Path to MCP YAML, dict, or MCPConfig object
+
     @classmethod
     def from_agent_config(cls, config: AgentConfig) -> "ConversationalAgentConfig":
         """Create from AgentConfig."""
@@ -289,6 +294,9 @@ class ConversationalAgent:
 
         # Session logger for event logging
         self._session_logger: Optional[SessionLogger] = None
+
+        # MCP manager for external tools
+        self._mcp_manager: Optional["MCPManager"] = None
 
         # Callbacks for UI updates
         self._on_plan_update: Optional[Callable[[PlanState], None]] = None
@@ -392,6 +400,10 @@ class ConversationalAgent:
             )
             self._summarizer = ConversationSummarizer(config=summary_config)
 
+        # Initialize MCP manager for external tools
+        if self.config.mcp_config:
+            self._init_mcp()
+
         self._started = True
 
     def shutdown(self, save_notebook: bool = True) -> Optional[Path]:
@@ -404,6 +416,14 @@ class ConversationalAgent:
             Path to saved notebook if save_notebook=True and there was content
         """
         notebook_path = None
+
+        # Disconnect MCP servers
+        if self._mcp_manager:
+            try:
+                self._mcp_manager.disconnect_all_sync()
+            except Exception:
+                pass  # Ignore errors on cleanup
+            self._mcp_manager = None
 
         # Close session logger
         if self._session_logger:
@@ -435,6 +455,42 @@ class ConversationalAgent:
 
         return notebook_path
 
+    def _init_mcp(self) -> None:
+        """Initialize MCP manager from config."""
+        try:
+            from dsagent.tools.mcp_manager import MCPManager
+            from dsagent.tools.config import MCPConfig
+
+            mcp_config = self.config.mcp_config
+            if isinstance(mcp_config, (str, Path)):
+                self._mcp_manager = MCPManager.from_yaml(mcp_config)
+            elif isinstance(mcp_config, dict):
+                self._mcp_manager = MCPManager.from_dict(mcp_config)
+            elif isinstance(mcp_config, MCPConfig):
+                self._mcp_manager = MCPManager(mcp_config)
+            else:
+                return
+
+            # Connect to all configured servers
+            self._mcp_manager.connect_all_sync()
+
+            if self._mcp_manager.connected_servers:
+                if self._session_logger:
+                    self._session_logger._file_logger.info(
+                        f"MCP: Connected to {len(self._mcp_manager.connected_servers)} server(s), "
+                        f"{len(self._mcp_manager.available_tools)} tool(s) available"
+                    )
+            else:
+                if self._session_logger:
+                    self._session_logger._file_logger.warning("MCP: No servers connected")
+
+        except ImportError:
+            # MCP package not installed
+            pass
+        except Exception as e:
+            if self._session_logger:
+                self._session_logger.log_error(f"Failed to initialize MCP: {e}", error_type="mcp_error")
+
     def _get_kernel_context(self) -> str:
         """Get kernel context for the system prompt."""
         if not self._introspector or not self.is_running:
@@ -446,9 +502,71 @@ class ConversationalAgent:
         return "Kernel state: empty"
 
     def _build_system_prompt(self) -> str:
-        """Build the system prompt with current context."""
+        """Build the system prompt with current context and available tools."""
         kernel_context = self._get_kernel_context()
-        return CONVERSATIONAL_SYSTEM_PROMPT.format(kernel_context=kernel_context)
+        base_prompt = CONVERSATIONAL_SYSTEM_PROMPT.format(kernel_context=kernel_context)
+
+        # Add MCP tools section if available
+        if self._mcp_manager and self._mcp_manager.available_tools:
+            tools_list = "\n".join(f"- {tool}" for tool in self._mcp_manager.available_tools)
+            tools_section = f"""
+
+## Available External Tools
+You have access to the following external tools via function calling:
+{tools_list}
+
+Use these tools when you need external information (e.g., web search, file access) before writing code.
+The tools will be called automatically when you request them."""
+            return base_prompt + tools_section
+
+        return base_prompt
+
+    def _get_tools_for_llm(self) -> Optional[List[Dict[str, Any]]]:
+        """Get tool definitions for LLM if MCP is available."""
+        if self._mcp_manager and self._mcp_manager.available_tools:
+            return self._mcp_manager.get_tools_for_llm()
+        return None
+
+    def _handle_tool_calls(self, tool_calls: List[Any]) -> List[Dict[str, Any]]:
+        """Execute tool calls and return results.
+
+        Args:
+            tool_calls: List of tool calls from LLM response
+
+        Returns:
+            List of tool result messages
+        """
+        import json
+        results = []
+
+        for tool_call in tool_calls:
+            tool_name = tool_call.function.name
+            try:
+                arguments = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+
+            if self._session_logger:
+                self._session_logger._file_logger.info(f"[TOOL CALL] {tool_name}")
+
+            try:
+                # Use the synchronous API which uses MCPManager's dedicated event loop
+                result = self._mcp_manager.execute_tool_sync(tool_name, arguments)
+                if self._session_logger:
+                    self._session_logger._file_logger.info(f"[TOOL RESULT] {tool_name}: success")
+
+            except Exception as e:
+                result = f"Error executing tool {tool_name}: {str(e)}"
+                if self._session_logger:
+                    self._session_logger.log_error(f"Tool error: {result}", error_type="tool_error")
+
+            results.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result if isinstance(result, str) else str(result),
+            })
+
+        return results
 
     def _create_notebook_builder(self, task: str, workspace: Path) -> NotebookBuilder:
         """Create the appropriate notebook builder based on configuration.
@@ -674,8 +792,11 @@ class ConversationalAgent:
         """Check if response contains <answer> tag."""
         return PlanParser.has_final_answer(text)
 
-    def _call_llm(self, messages: List[Dict[str, str]]) -> str:
-        """Call the LLM and return response text."""
+    def _call_llm(self, messages: List[Dict[str, Any]]) -> str:
+        """Call the LLM and return response text.
+
+        Handles MCP tool calls if available - executes tools and calls LLM again with results.
+        """
         # Log request
         if self._session_logger:
             self._session_logger.log_llm_request(
@@ -688,15 +809,70 @@ class ConversationalAgent:
         start_time = time.time()
         # Transform model name for proxy if LLM_API_BASE is set
         model_name = get_proxy_model_name(self.config.model)
+
+        # Build completion kwargs
+        kwargs: Dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+
+        # Add tools if available
+        tools = self._get_tools_for_llm()
+        if tools:
+            kwargs["tools"] = tools
+        else:
+            # Only use stop sequences when no tools (tools don't work well with stop)
+            kwargs["stop"] = self.STOP_SEQUENCES
+
         try:
-            response = completion(
-                model=model_name,
-                messages=messages,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                stop=self.STOP_SEQUENCES,
-            )
-            content = response.choices[0].message.content or ""
+            response = completion(**kwargs)
+            message = response.choices[0].message
+            content = message.content or ""
+            tool_calls = getattr(message, "tool_calls", None)
+
+            # Handle tool calls if present
+            if tool_calls and self._mcp_manager:
+                if self._session_logger:
+                    self._session_logger._file_logger.info(
+                        f"[TOOL CALLS] LLM requested {len(tool_calls)} tool(s)"
+                    )
+
+                # Add assistant message with tool calls to messages
+                messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in tool_calls
+                    ],
+                })
+
+                # Execute tools and add results
+                tool_results = self._handle_tool_calls(tool_calls)
+                messages.extend(tool_results)
+
+                # Call LLM again with tool results (without stop sequences)
+                kwargs_retry = {
+                    "model": model_name,
+                    "messages": messages,
+                    "temperature": self.config.temperature,
+                    "max_tokens": self.config.max_tokens,
+                }
+                if tools:
+                    kwargs_retry["tools"] = tools
+
+                response = completion(**kwargs_retry)
+                content = response.choices[0].message.content or ""
+
             latency_ms = (time.time() - start_time) * 1000
 
             # Extract thinking from Claude responses (if present)
@@ -721,12 +897,8 @@ class ConversationalAgent:
         except Exception as e:
             # Handle stop parameter not supported
             if "stop" in str(e).lower():
-                response = completion(
-                    model=model_name,
-                    messages=messages,
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens,
-                )
+                kwargs.pop("stop", None)
+                response = completion(**kwargs)
                 content = response.choices[0].message.content or ""
                 latency_ms = (time.time() - start_time) * 1000
 
