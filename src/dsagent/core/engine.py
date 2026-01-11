@@ -108,7 +108,15 @@ Comprehensive summary of findings, insights, and recommendations.
    - Do NOT attempt to generate equivalent data yourself
 
 ## Available Libraries
-pandas, numpy, matplotlib, seaborn, scikit-learn, scipy, statsmodels, pycaret, joblib
+pandas, numpy, scipy, polars, pyarrow, matplotlib, seaborn, plotly, scikit-learn, xgboost, lightgbm, statsmodels, pycaret, boruta, tqdm, joblib
+
+## Bash Commands & LaTeX
+You can execute bash commands using IPython magic:
+- Single command: `!pdflatex report.tex`
+- Multi-line: Use `%%bash` cell magic
+
+LaTeX tools available (Docker only): pdflatex, xelatex, latexmk
+Use this to generate PDF reports or presentations from your analysis.
 
 {tools_section}
 
